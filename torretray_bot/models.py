@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 
 from torretray_bot.localization import t
 
@@ -180,6 +181,94 @@ class CurrentPreferences:
             ),
             preferences=preferences if isinstance(preferences, dict) else None,
         )
+
+
+@dataclass(frozen=True)
+class MealScheduleWindow:
+    """One backend-defined service window for one date."""
+
+    service_key: str
+    label: str
+    meal_type: str
+    reservation_type: str
+    start_time: str
+    end_time: str
+    preference_cutoff_time: str | None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, object]) -> "MealScheduleWindow":
+        """Build one schedule window from backend JSON."""
+        return cls(
+            service_key=str(payload["service_key"]),
+            label=str(payload["label"]),
+            meal_type=str(payload["meal_type"]),
+            reservation_type=str(payload["reservation_type"]),
+            start_time=str(payload["start_time"]),
+            end_time=str(payload["end_time"]),
+            preference_cutoff_time=(
+                str(payload["preference_cutoff_time"])
+                if payload.get("preference_cutoff_time") is not None
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class DailyMealSchedule:
+    """One day's schedule returned by the backend."""
+
+    date: date
+    weekday: str
+    weekday_label: str
+    windows: list[MealScheduleWindow]
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, object]) -> "DailyMealSchedule":
+        """Build one daily schedule from backend JSON."""
+        raw_windows = payload.get("windows", [])
+        return cls(
+            date=date.fromisoformat(str(payload["date"])),
+            weekday=str(payload["weekday"]),
+            weekday_label=str(payload["weekday_label"]),
+            windows=[
+                MealScheduleWindow.from_payload(window)
+                for window in raw_windows
+                if isinstance(window, dict)
+            ],
+        )
+
+
+@dataclass(frozen=True)
+class WeekdayMealSchedule:
+    """One weekday template returned by the backend."""
+
+    weekday: str
+    weekday_label: str
+    windows: list[MealScheduleWindow]
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, object]) -> "WeekdayMealSchedule":
+        """Build one weekday template from backend JSON."""
+        raw_windows = payload.get("windows", [])
+        return cls(
+            weekday=str(payload["weekday"]),
+            weekday_label=str(payload["weekday_label"]),
+            windows=[
+                MealScheduleWindow.from_payload(window)
+                for window in raw_windows
+                if isinstance(window, dict)
+            ],
+        )
+
+
+@dataclass
+class ScheduleEditSession:
+    """In-memory admin flow state for editing one meal schedule window."""
+
+    weekday: str | None = None
+    service_key: str | None = None
+    start_time: str | None = None
+    awaiting_time_field: str | None = None
 
 
 @dataclass(frozen=True)

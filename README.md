@@ -16,15 +16,23 @@ Create a `.env` file from `.env.example` and set:
 - `TELEGRAM_BOT_TOKEN`
 - `TORRETRAY_BACKEND_URL`
 - `TORRETRAY_HTTP_TIMEOUT_SECONDS` (optional)
+- `TORRETRAY_ADMIN_TELEGRAM_IDS` with a comma-separated list of Telegram user ids allowed to manage schedules
 
-Meal deadlines are controlled by the backend env, not by bot code. In `TorreTray-backend/.env` you can set:
+Meal deadlines now come from the backend meal schedule. Admins can inspect or update one day's windows from Telegram:
 
-- `MEAL_PREFERENCE_LUNCH_CUTOFF=10:00`
-- `MEAL_PREFERENCE_DINNER_CUTOFF=16:00`
+- `/mealschedule`
+- `/mealschedule monday`
+- `/setmealschedule monday lunch 13:00 14:30`
 
 ## Run
 
 ```bash
 pip install -r requirements.txt
 python -m torretray_bot
+```
+
+To test against a specific date without changing `.env`:
+
+```bash
+python -m torretray_bot --test-time 2026-03-23
 ```

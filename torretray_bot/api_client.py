@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import httpx
 
-from torretray_bot.models import BackendUser, CurrentPreferences, PreferenceContext
+from torretray_bot.models import (
+    BackendUser,
+    CurrentPreferences,
+    DailyMealSchedule,
+    PreferenceContext,
+    WeekdayMealSchedule,
+)
 
 
 class BackendApiError(Exception):
@@ -21,11 +28,17 @@ class BackendApiError(Exception):
 class TorreTrayBackendClient:
     """Async wrapper around the backend endpoints used by the bot."""
 
-    def __init__(self, base_url: str, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float,
+        test_date: date | None = None,
+    ) -> None:
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout_seconds,
         )
+        self._test_date = test_date
 
     async def aclose(self) -> None:
         """Close the underlying HTTP client."""
@@ -97,10 +110,10 @@ class TorreTrayBackendClient:
         payload = await self._request(
             "GET",
             "/meal-status/preferences/context",
-            params={
-                "user_id": user_id,
-                "meal_type": meal_type,
-            },
+            params=self._date_params(
+                user_id=user_id,
+                meal_type=meal_type,
+            ),
         )
         return PreferenceContext.from_payload(payload)
 
@@ -114,10 +127,10 @@ class TorreTrayBackendClient:
         payload = await self._request(
             "GET",
             "/meal-status/preferences/current",
-            params={
-                "user_id": user_id,
-                "meal_type": meal_type,
-            },
+            params=self._date_params(
+                user_id=user_id,
+                meal_type=meal_type,
+            ),
         )
         return CurrentPreferences.from_payload(payload)
 
@@ -147,6 +160,59 @@ class TorreTrayBackendClient:
         )
         return response_payload or {}
 
+    async def get_meal_schedule(self, *, target_date: date) -> DailyMealSchedule:
+        """Return one concrete day's backend-defined service schedule."""
+        payload = await self._request(
+            "GET",
+            f"/meal-schedules/{target_date.isoformat()}",
+        )
+        return DailyMealSchedule.from_payload(payload or {})
+
+    async def list_meal_schedule_templates(self) -> list[WeekdayMealSchedule]:
+        """Return the full monday-sunday backend schedule templates."""
+        payload = await self._request(
+            "GET",
+            "/meal-schedules/templates",
+        )
+        if not isinstance(payload, list):
+            raise BackendApiError("The backend returned an unexpected response.")
+        return [
+            WeekdayMealSchedule.from_payload(item)
+            for item in payload
+            if isinstance(item, dict)
+        ]
+
+    async def get_meal_schedule_template(
+        self,
+        *,
+        weekday: str,
+    ) -> WeekdayMealSchedule:
+        """Return one weekday backend schedule template."""
+        payload = await self._request(
+            "GET",
+            f"/meal-schedules/templates/{weekday}",
+        )
+        return WeekdayMealSchedule.from_payload(payload or {})
+
+    async def update_meal_schedule_template_window(
+        self,
+        *,
+        weekday: str,
+        service_key: str,
+        start_time: str,
+        end_time: str,
+    ) -> WeekdayMealSchedule:
+        """Update one service window in one weekday template."""
+        payload = await self._request(
+            "PATCH",
+            f"/meal-schedules/templates/{weekday}/{service_key}",
+            json={
+                "start_time": start_time,
+                "end_time": end_time,
+            },
+        )
+        return WeekdayMealSchedule.from_payload(payload or {})
+
     async def _request(
         self,
         method: str,
@@ -154,7 +220,7 @@ class TorreTrayBackendClient:
         *,
         allow_not_found: bool = False,
         **kwargs: Any,
-    ) -> dict[str, Any] | None:
+    ) -> dict[str, Any] | list[Any] | None:
         """Perform one backend request and normalize backend errors."""
         try:
             response = await self._client.request(method, path, **kwargs)
@@ -170,7 +236,7 @@ class TorreTrayBackendClient:
             )
 
         payload = response.json()
-        if not isinstance(payload, dict):
+        if not isinstance(payload, (dict, list)):
             raise BackendApiError("The backend returned an unexpected response.")
         return payload
 
@@ -186,3 +252,9 @@ class TorreTrayBackendClient:
         if isinstance(detail, str) and detail.strip():
             return detail
         return f"Backend error {response.status_code}."
+
+    def _date_params(self, **params: Any) -> dict[str, Any]:
+        """Append the configured test date to one request when present."""
+        if self._test_date is not None:
+            params["date"] = self._test_date.isoformat()
+        return params

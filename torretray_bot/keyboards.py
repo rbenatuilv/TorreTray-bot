@@ -174,3 +174,80 @@ def clear_confirmation_keyboard(language: str, meal_type: str) -> InlineKeyboard
             ]
         ]
     )
+
+
+def schedule_weekday_keyboard(language: str) -> InlineKeyboardMarkup:
+    """Return the keyboard used to pick the weekday template to edit."""
+    rows = [
+        [
+            InlineKeyboardButton(
+                t(language, "weekday_monday"),
+                callback_data="schedweekday:monday",
+            ),
+            InlineKeyboardButton(
+                t(language, "weekday_tuesday"),
+                callback_data="schedweekday:tuesday",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                t(language, "weekday_wednesday"),
+                callback_data="schedweekday:wednesday",
+            ),
+            InlineKeyboardButton(
+                t(language, "weekday_thursday"),
+                callback_data="schedweekday:thursday",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                t(language, "weekday_friday"),
+                callback_data="schedweekday:friday",
+            ),
+            InlineKeyboardButton(
+                t(language, "weekday_saturday"),
+                callback_data="schedweekday:saturday",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                t(language, "weekday_sunday"),
+                callback_data="schedweekday:sunday",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"↩️ {t(language, 'button_cancel')}",
+                callback_data="schedcancel",
+            )
+        ],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+def schedule_service_keyboard(language: str) -> InlineKeyboardMarkup:
+    """Return the keyboard used to pick which meal window to edit."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    t(language, "service_breakfast"),
+                    callback_data="schedservice:breakfast",
+                ),
+                InlineKeyboardButton(
+                    t(language, "service_lunch"),
+                    callback_data="schedservice:lunch",
+                ),
+                InlineKeyboardButton(
+                    t(language, "service_dinner"),
+                    callback_data="schedservice:dinner",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    f"↩️ {t(language, 'button_cancel')}",
+                    callback_data="schedcancel",
+                )
+            ],
+        ]
+    )

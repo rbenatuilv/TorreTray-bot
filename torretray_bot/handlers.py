@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import time
 
 from telegram import CallbackQuery, Message, Update
 from telegram.ext import ContextTypes
@@ -14,17 +15,37 @@ from torretray_bot.keyboards import (
     confirmation_keyboard,
     language_keyboard,
     meal_type_keyboard,
+    schedule_service_keyboard,
+    schedule_weekday_keyboard,
     section_keyboard,
     unregister_keyboard,
     view_preferences_keyboard,
 )
 from torretray_bot.localization import infer_language, normalize_language, t
-from torretray_bot.models import BackendUser, CurrentPreferences, MenuSection, PreferenceSession
+from torretray_bot.models import (
+    BackendUser,
+    CurrentPreferences,
+    MenuSection,
+    PreferenceSession,
+    ScheduleEditSession,
+    WeekdayMealSchedule,
+)
 
 REGISTRATION_PENDING_KEY = "registration_pending"
 PREFERENCE_SESSION_KEY = "preference_session"
 REGISTERED_USER_KEY = "registered_user"
+SCHEDULE_EDIT_SESSION_KEY = "schedule_edit_session"
 LOGGER = logging.getLogger(__name__)
+VALID_SERVICE_KEYS = {"breakfast", "lunch", "dinner"}
+VALID_WEEKDAY_KEYS = {
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+}
 
 
 async def start_command(
@@ -164,6 +185,67 @@ async def language_command(
     )
 
 
+async def meal_schedule_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Show one day's backend-defined meal schedule to admins."""
+    message = update.effective_message
+    if not await _ensure_admin_access(update, context):
+        return
+    if message is None:
+        return
+
+    language = _language_for_update(update, context)
+    try:
+        if context.args:
+            weekday = _parse_weekday_arg(context.args[0])
+            if weekday is None:
+                await message.reply_text(t(language, "schedule_invalid_weekday"))
+                await message.reply_text(t(language, "meal_schedule_usage"))
+                return
+            schedule = await get_api_client(context).get_meal_schedule_template(
+                weekday=weekday
+            )
+            await message.reply_text(_format_weekday_schedule(language, schedule))
+            return
+
+        schedules = await get_api_client(context).list_meal_schedule_templates()
+    except BackendApiError as exc:
+        LOGGER.warning("Could not load meal schedule templates: %s", exc.message)
+        await message.reply_text(exc.message)
+        return
+
+    await message.reply_text(_format_weekly_schedules(language, schedules))
+
+
+async def set_meal_schedule_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Start the guided admin flow used to update a meal schedule window."""
+    message = update.effective_message
+    if not await _ensure_admin_access(update, context):
+        return
+    if message is None:
+        return
+
+    language = _language_for_update(update, context)
+    if len(context.args) == 4:
+        await _update_schedule_from_args(message, context, language)
+        return
+
+    if context.args:
+        await message.reply_text(t(language, "set_meal_schedule_usage"))
+        return
+
+    context.user_data[SCHEDULE_EDIT_SESSION_KEY] = ScheduleEditSession()
+    await message.reply_text(
+        t(language, "schedule_pick_weekday"),
+        reply_markup=schedule_weekday_keyboard(language),
+    )
+
+
 async def unregister_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -207,6 +289,9 @@ async def text_message_handler(
         await _register_current_user(message, context, message.text.strip())
         return
 
+    if await _handle_schedule_edit_text(message, context):
+        return
+
     await message.reply_text(
         t(_language_for_message(message, context), "plain_help")
     )
@@ -236,6 +321,23 @@ async def callback_query_handler(
     if query.data.startswith("lang:"):
         language = query.data.split(":", maxsplit=1)[1]
         await _update_language(query, context, language)
+        return
+
+    if query.data == "schedcancel":
+        context.user_data.pop(SCHEDULE_EDIT_SESSION_KEY, None)
+        await query.edit_message_text(
+            t(_language_for_query(query, context), "schedule_cancelled")
+        )
+        return
+
+    if query.data.startswith("schedweekday:"):
+        weekday = query.data.split(":", maxsplit=1)[1]
+        await _handle_schedule_weekday_choice(query, context, weekday)
+        return
+
+    if query.data.startswith("schedservice:"):
+        service_key = query.data.split(":", maxsplit=1)[1]
+        await _handle_schedule_service_choice(query, context, service_key)
         return
 
     if query.data == "unregister:yes":
@@ -977,6 +1079,201 @@ def _clear_transient_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Remove transient user conversation state."""
     context.user_data.pop(REGISTRATION_PENDING_KEY, None)
     context.user_data.pop(PREFERENCE_SESSION_KEY, None)
+    context.user_data.pop(SCHEDULE_EDIT_SESSION_KEY, None)
+
+
+async def _update_schedule_from_args(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    language: str,
+) -> None:
+    """Keep supporting the direct four-argument schedule update form."""
+    raw_weekday, raw_service_key, raw_start_time, raw_end_time = context.args
+    weekday = _parse_weekday_arg(raw_weekday)
+    service_key = raw_service_key.lower().strip()
+    if weekday is None:
+        await message.reply_text(t(language, "schedule_invalid_weekday"))
+        return
+    if service_key not in VALID_SERVICE_KEYS:
+        await message.reply_text(t(language, "schedule_invalid_service"))
+        return
+    if _parse_schedule_time(raw_start_time) is None or _parse_schedule_time(raw_end_time) is None:
+        await message.reply_text(t(language, "schedule_invalid_time"))
+        return
+
+    try:
+        schedule = await get_api_client(context).update_meal_schedule_template_window(
+            weekday=weekday,
+            service_key=service_key,
+            start_time=raw_start_time,
+            end_time=raw_end_time,
+        )
+    except BackendApiError as exc:
+        LOGGER.warning(
+            "Could not update meal schedule for %s %s: %s",
+            weekday,
+            service_key,
+            exc.message,
+        )
+        await message.reply_text(exc.message)
+        return
+
+    await message.reply_text(
+        t(
+            language,
+            "schedule_updated",
+            service=_service_label(language, service_key),
+            weekday=_weekday_label(language, schedule.weekday, schedule.weekday_label),
+            start_time=raw_start_time,
+            end_time=raw_end_time,
+        )
+    )
+    await message.reply_text(_format_weekday_schedule(language, schedule))
+
+
+async def _handle_schedule_weekday_choice(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    weekday: str,
+) -> None:
+    """Store the chosen weekday and ask which service window to edit."""
+    language = _language_for_query(query, context)
+    session = context.user_data.get(SCHEDULE_EDIT_SESSION_KEY)
+    if not isinstance(session, ScheduleEditSession):
+        session = ScheduleEditSession()
+        context.user_data[SCHEDULE_EDIT_SESSION_KEY] = session
+    session.weekday = weekday
+    session.service_key = None
+    session.start_time = None
+    session.awaiting_time_field = None
+
+    await query.edit_message_text(
+        t(
+            language,
+            "schedule_pick_service",
+            weekday=_weekday_label(language, weekday, weekday.title()),
+        ),
+        reply_markup=schedule_service_keyboard(language),
+    )
+
+
+async def _handle_schedule_service_choice(
+    query: CallbackQuery,
+    context: ContextTypes.DEFAULT_TYPE,
+    service_key: str,
+) -> None:
+    """Store the chosen service and ask the admin for the start time."""
+    language = _language_for_query(query, context)
+    session = context.user_data.get(SCHEDULE_EDIT_SESSION_KEY)
+    if not isinstance(session, ScheduleEditSession) or session.weekday is None:
+        await query.edit_message_text(t(language, "schedule_no_active_edit"))
+        return
+
+    session.service_key = service_key
+    session.start_time = None
+    session.awaiting_time_field = "start_time"
+    await query.edit_message_text(
+        t(
+            language,
+            "schedule_prompt_start_time",
+            service=_service_label(language, service_key),
+            weekday=_weekday_label(language, session.weekday, session.weekday.title()),
+        )
+    )
+
+
+async def _handle_schedule_edit_text(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Handle start/end time input for the active admin schedule flow."""
+    session = context.user_data.get(SCHEDULE_EDIT_SESSION_KEY)
+    if not isinstance(session, ScheduleEditSession):
+        return False
+
+    language = _language_for_message(message, context)
+    raw_value = message.text.strip()
+    parsed_time = _parse_schedule_time(raw_value)
+    if parsed_time is None:
+        await message.reply_text(t(language, "schedule_invalid_time"))
+        return True
+
+    if (
+        session.awaiting_time_field == "start_time"
+        and session.weekday is not None
+        and session.service_key is not None
+    ):
+        session.start_time = parsed_time.strftime("%H:%M")
+        session.awaiting_time_field = "end_time"
+        await message.reply_text(
+            t(language, "schedule_time_saved", time=session.start_time)
+        )
+        await message.reply_text(
+            t(
+                language,
+                "schedule_prompt_end_time",
+                service=_service_label(language, session.service_key),
+                weekday=_weekday_label(language, session.weekday, session.weekday.title()),
+            )
+        )
+        return True
+
+    if (
+        session.awaiting_time_field == "end_time"
+        and session.weekday is not None
+        and session.service_key is not None
+        and session.start_time is not None
+    ):
+        try:
+            schedule = await get_api_client(context).update_meal_schedule_template_window(
+                weekday=session.weekday,
+                service_key=session.service_key,
+                start_time=session.start_time,
+                end_time=parsed_time.strftime("%H:%M"),
+            )
+        except BackendApiError as exc:
+            LOGGER.warning(
+                "Could not update meal schedule for %s %s: %s",
+                session.weekday,
+                session.service_key,
+                exc.message,
+            )
+            await message.reply_text(exc.message)
+            return True
+
+        context.user_data.pop(SCHEDULE_EDIT_SESSION_KEY, None)
+        await message.reply_text(
+            t(
+                language,
+                "schedule_updated",
+                service=_service_label(language, session.service_key),
+                weekday=_weekday_label(language, schedule.weekday, schedule.weekday_label),
+                start_time=session.start_time,
+                end_time=parsed_time.strftime("%H:%M"),
+            )
+        )
+        await message.reply_text(_format_weekday_schedule(language, schedule))
+        return True
+
+    context.user_data.pop(SCHEDULE_EDIT_SESSION_KEY, None)
+    await message.reply_text(t(language, "schedule_no_active_edit"))
+    return True
+
+
+async def _ensure_admin_access(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    """Return whether the current Telegram user is allowed to run admin commands."""
+    message = update.effective_message
+    telegram_user = update.effective_user
+    if message is None or telegram_user is None:
+        return False
+    admin_ids = context.application.bot_data.get("admin_telegram_ids", frozenset())
+    if telegram_user.id in admin_ids:
+        return True
+    await message.reply_text(t(_language_for_update(update, context), "admin_only"))
+    return False
 
 
 def _telegram_id(update: Update) -> str:
@@ -1038,7 +1335,7 @@ async def _unregister_current_user(
     )
     context.user_data.pop(REGISTERED_USER_KEY, None)
     context.user_data.pop(PREFERENCE_SESSION_KEY, None)
-    context.user_data.pop(REGISTRATION_PENDING_KEY, None)
+    context.user_data[REGISTRATION_PENDING_KEY] = True
     await query.message.reply_text(
         t(updated_user.preferred_language, "unregister_done")
     )
@@ -1080,6 +1377,94 @@ def _stored_language(context: ContextTypes.DEFAULT_TYPE) -> str:
     if isinstance(user, BackendUser):
         return normalize_language(user.preferred_language)
     return "en"
+
+
+def _parse_weekday_arg(raw_value: str | None) -> str | None:
+    """Parse one weekday template key."""
+    if raw_value is None:
+        return None
+    weekday = raw_value.strip().lower()
+    if weekday in VALID_WEEKDAY_KEYS:
+        return weekday
+    LOGGER.info("Invalid admin schedule weekday received: %s", raw_value)
+    return None
+
+
+def _parse_schedule_time(raw_value: str) -> time | None:
+    """Parse one HH:MM time argument."""
+    try:
+        return time.fromisoformat(raw_value)
+    except ValueError:
+        return None
+
+
+def _format_weekly_schedules(
+    language: str,
+    schedules: list[WeekdayMealSchedule],
+) -> str:
+    """Render the full monday-sunday schedule template list."""
+    if not schedules:
+        return t(language, "weekly_schedule_empty")
+    lines = [t(language, "weekly_schedule_header"), ""]
+    for index, schedule in enumerate(schedules):
+        if index:
+            lines.append("")
+        lines.extend(_weekday_schedule_lines(language, schedule))
+    return "\n".join(lines)
+
+
+def _format_weekday_schedule(language: str, schedule: WeekdayMealSchedule) -> str:
+    """Render one weekday schedule template."""
+    return "\n".join(_weekday_schedule_lines(language, schedule))
+
+
+def _weekday_schedule_lines(
+    language: str,
+    schedule: WeekdayMealSchedule,
+) -> list[str]:
+    """Build the message lines for one weekday schedule template."""
+    lines = [
+        t(
+            language,
+            "schedule_header",
+            weekday=_weekday_label(language, schedule.weekday, schedule.weekday_label),
+        ),
+        "",
+    ]
+    for window in schedule.windows:
+        lines.append(
+            t(
+                language,
+                "schedule_window_line",
+                service=_service_label(language, window.service_key),
+                start_time=window.start_time,
+                end_time=window.end_time,
+            )
+        )
+        if window.preference_cutoff_time is not None:
+            lines.append(
+                t(
+                    language,
+                    "schedule_cutoff_line",
+                    cutoff_time=window.preference_cutoff_time,
+                )
+            )
+    return lines
+
+
+def _service_label(language: str, service_key: str) -> str:
+    """Return the localized service label for one schedule key."""
+    return t(language, f"service_{service_key}")
+
+
+def _weekday_label(language: str, weekday: str, fallback: str) -> str:
+    """Return the localized label for one weekday key when available."""
+    translation_key = f"weekday_{weekday}"
+    try:
+        return t(language, translation_key)
+    except KeyError:
+        return fallback
+
 
 def _meal_label(language: str, meal_type: str) -> str:
     """Return the localized human-readable meal label."""
